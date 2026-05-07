@@ -1,138 +1,180 @@
 """
 UZSCII — Image to ASCII Converter
-Converts any uploaded image into ASCII art using brightness mapping.
+Supports still image upload and live webcam ASCII stream.
 """
 
+import time
 import streamlit as st
 from PIL import Image
-import io
+import cv2
+import numpy as np
 
 # --------------------------------------------------------------------------
-# ASCII character set — ordered from darkest (dense) to lightest (sparse).
-# Dark pixels → characters with lots of ink (@, %, #).
-# Light pixels → minimal characters (dot, space).
+# ASCII character set — dark (dense) → light (sparse)
 # --------------------------------------------------------------------------
 ASCII_CHARS = "@%#*+=-:. "
 
 
-def resize_image(image: Image.Image, new_width: int) -> Image.Image:
-    """
-    Resize the image to the target width while preserving aspect ratio.
+# --------------------------------------------------------------------------
+# Core algorithm (shared by both upload and webcam modes)
+# --------------------------------------------------------------------------
 
-    Characters in a monospace font are roughly twice as tall as they are wide,
-    so we multiply height by 0.5 (the aspect correction factor) to prevent
-    the ASCII output from looking vertically stretched.
-    """
-    original_width, original_height = image.size
-    aspect_ratio = original_height / original_width
-    # Apply 0.5 correction because each character cell is ~2x taller than wide
-    new_height = int(new_width * aspect_ratio * 0.5)
-    return image.resize((new_width, new_height))
+def resize_image(image: Image.Image, new_width: int) -> Image.Image:
+    """Resize to target width; multiply height by 0.5 to correct char aspect ratio."""
+    w, h = image.size
+    new_height = int(new_width * (h / w) * 0.5)
+    return image.resize((new_width, max(new_height, 1)))
 
 
 def to_grayscale(image: Image.Image) -> Image.Image:
-    """Convert the image to grayscale (single brightness channel, 0–255)."""
     return image.convert("L")
 
 
 def pixels_to_ascii(image: Image.Image) -> str:
-    """
-    Map each pixel's brightness value (0–255) to an ASCII character.
-
-    Brightness 0   → index 0   → '@'  (darkest / most dense)
-    Brightness 255 → index -1  → ' '  (lightest / empty)
-
-    We scale the 0–255 range to 0–(len-1) by integer division.
-    """
     pixels = list(image.getdata())
-    chars_per_pixel = len(ASCII_CHARS) - 1
-
-    # Map each brightness value to a character
-    ascii_chars = [ASCII_CHARS[pixel * chars_per_pixel // 255] for pixel in pixels]
-
-    # Split the flat list of characters into rows based on image width
-    width = image.width
-    lines = [
-        "".join(ascii_chars[i : i + width])
-        for i in range(0, len(ascii_chars), width)
-    ]
-    return "\n".join(lines)
+    n = len(ASCII_CHARS) - 1
+    chars = [ASCII_CHARS[px * n // 255] for px in pixels]
+    w = image.width
+    return "\n".join("".join(chars[i : i + w]) for i in range(0, len(chars), w))
 
 
-def convert_image_to_ascii(image: Image.Image, width: int) -> str:
-    """Full pipeline: resize → grayscale → ASCII."""
-    resized = resize_image(image, width)
-    gray = to_grayscale(resized)
-    return pixels_to_ascii(gray)
+def convert_to_ascii(image: Image.Image, width: int) -> str:
+    return pixels_to_ascii(to_grayscale(resize_image(image, width)))
+
+
+def bgr_frame_to_pil(frame: np.ndarray) -> Image.Image:
+    """Convert an OpenCV BGR frame to a PIL RGB image."""
+    return Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
 
 
 # --------------------------------------------------------------------------
-# Streamlit UI
+# Page config
 # --------------------------------------------------------------------------
 
 st.set_page_config(page_title="UZSCII", page_icon="▓", layout="wide")
 
 st.title("▓ UZSCII")
-st.caption("Upload an image. Get ASCII art. Download it.")
+st.caption("Image-to-ASCII converter — upload a photo or stream your webcam live.")
 
-# Sidebar controls
-with st.sidebar:
-    st.header("Settings")
-    ascii_width = st.slider(
-        label="Output width (characters)",
-        min_value=40,
-        max_value=200,
-        value=100,
-        step=5,
-        help="More characters = more detail, but wider output.",
+# --------------------------------------------------------------------------
+# Inline controls (no sidebar — avoids sidebar collapsing on interaction)
+# --------------------------------------------------------------------------
+
+ctrl_col1, ctrl_col2, _ = st.columns([2, 2, 4])
+
+with ctrl_col1:
+    ascii_width = st.slider("Output width (chars)", 40, 200, 100, 5)
+
+with ctrl_col2:
+    fps_target = st.slider("Webcam FPS", 1, 20, 10, 1)
+
+st.divider()
+
+# --------------------------------------------------------------------------
+# Tabs
+# --------------------------------------------------------------------------
+
+tab_upload, tab_webcam = st.tabs(["📁 Upload Image", "📷 Live Webcam"])
+
+
+# ── Tab 1: Upload ──────────────────────────────────────────────────────────
+
+with tab_upload:
+
+    # Session state key trick: incrementing forces a fresh empty uploader
+    if "uploader_key" not in st.session_state:
+        st.session_state.uploader_key = 0
+
+    uploaded_file = st.file_uploader(
+        "Drag & drop or browse",
+        type=["jpg", "jpeg", "png", "webp"],
+        key=f"uploader_{st.session_state.uploader_key}",
     )
-    st.markdown("---")
-    st.markdown(
-        "**Character set** (dark → light)\n\n`" + " ".join(list(ASCII_CHARS)) + "`"
-    )
 
-# File uploader
-uploaded_file = st.file_uploader(
-    label="Upload an image",
-    type=["jpg", "jpeg", "png", "webp"],
-    help="Supported formats: JPG, JPEG, PNG, WEBP",
-)
+    if uploaded_file is not None:
+        # Clear button — resets uploader by bumping the key
+        if st.button("✕ Remove image", key="clear_btn"):
+            st.session_state.uploader_key += 1
+            st.rerun()
 
-if uploaded_file is not None:
-    try:
-        # Load the image from the uploaded bytes
-        image = Image.open(uploaded_file)
+        try:
+            image = Image.open(uploaded_file)
 
-        # Layout: original image on the left, ASCII output on the right
-        col_img, col_ascii = st.columns([1, 2])
+            with st.spinner("Converting…"):
+                ascii_result = convert_to_ascii(image, ascii_width)
 
-        with col_img:
-            st.subheader("Original")
-            st.image(image, use_container_width=True)
-            st.caption(f"{image.width} × {image.height} px · {image.mode}")
+            col_ascii, col_img = st.columns([2, 1])
 
-        with col_ascii:
-            st.subheader("ASCII Output")
+            with col_ascii:
+                st.subheader("ASCII output")
+                st.code(ascii_result, language=None)
+                st.download_button(
+                    "⬇ Download uzscii_output.txt",
+                    data=ascii_result.encode("utf-8"),
+                    file_name="uzscii_output.txt",
+                    mime="text/plain",
+                )
 
-            with st.spinner("Converting..."):
-                ascii_result = convert_image_to_ascii(image, ascii_width)
+            with col_img:
+                st.subheader("Original")
+                st.image(image, use_container_width=True)
+                st.caption(f"{image.width} × {image.height} px · {image.mode}")
 
-            # Display in a code block so the font is monospaced
-            st.code(ascii_result, language=None)
+        except Exception as e:
+            st.error(f"Could not process image: {e}")
+            st.info("Make sure the file is a valid JPG, JPEG, PNG, or WEBP image.")
 
-        # Download button — encode the ASCII string to bytes
-        txt_bytes = ascii_result.encode("utf-8")
-        st.download_button(
-            label="⬇ Download uzscii_output.txt",
-            data=txt_bytes,
-            file_name="uzscii_output.txt",
-            mime="text/plain",
-        )
+    else:
+        st.info("Upload an image above to get started.")
 
-    except Exception as e:
-        st.error(f"Could not process image: {e}")
-        st.info("Make sure the file is a valid JPG, JPEG, PNG, or WEBP image.")
 
-else:
-    # Placeholder when nothing is uploaded yet
-    st.info("Upload an image using the panel above to get started.")
+# ── Tab 2: Webcam ──────────────────────────────────────────────────────────
+
+with tab_webcam:
+
+    if "webcam_running" not in st.session_state:
+        st.session_state.webcam_running = False
+
+    btn_col1, btn_col2, _ = st.columns([1, 1, 6])
+
+    with btn_col1:
+        if st.button("▶ Start", disabled=st.session_state.webcam_running):
+            st.session_state.webcam_running = True
+            st.rerun()
+
+    with btn_col2:
+        if st.button("■ Stop", disabled=not st.session_state.webcam_running):
+            st.session_state.webcam_running = False
+            st.rerun()
+
+    status = st.empty()
+    frame_slot = st.empty()
+
+    if st.session_state.webcam_running:
+        cap = cv2.VideoCapture(0)
+
+        if not cap.isOpened():
+            status.error("Could not open webcam. Make sure it is connected and not in use by another app.")
+            st.session_state.webcam_running = False
+        else:
+            status.success("Webcam streaming — click ■ Stop to end.")
+            frame_interval = 1.0 / fps_target
+
+            try:
+                while st.session_state.webcam_running:
+                    ret, frame = cap.read()
+                    if not ret:
+                        status.warning("Lost webcam signal.")
+                        break
+
+                    pil_image = bgr_frame_to_pil(frame)
+                    ascii_frame = convert_to_ascii(pil_image, ascii_width)
+                    frame_slot.code(ascii_frame, language=None)
+
+                    time.sleep(frame_interval)
+
+            finally:
+                cap.release()
+                status.info("Webcam stopped.")
+    else:
+        status.info("Press ▶ Start to begin the ASCII webcam stream.")
