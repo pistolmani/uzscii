@@ -2,21 +2,23 @@
 UZSCII — Image to ASCII Converter
 Supports still image upload and live webcam ASCII stream.
 Color mode samples real RGB from each pixel.
-Rain mode reveals the image Matrix-style, column by column.
+Rain mode is browser-side JS — no server loop, scroll works fine.
 """
 
+import json
 import time
 import random
 import streamlit as st
-from PIL import Image, ImageFilter
+import streamlit.components.v1 as components
+from PIL import Image
 import cv2
 import numpy as np
 
 # --------------------------------------------------------------------------
 # Character sets
 # --------------------------------------------------------------------------
-CHARS_STANDARD = "8096532471:. "   # dark → light, numbers only
-RAIN_CHARS     = "8096532471"      # random chars used for falling heads
+CHARS_STANDARD = "8096532471:. "
+RAIN_CHARS     = "8096532471"
 
 
 # --------------------------------------------------------------------------
@@ -58,25 +60,17 @@ def get_edge_data(gray: Image.Image):
 
 
 def prepare_image_data(image: Image.Image, width: int, edge: bool):
-    """
-    Returns (chars_grid, colors_grid) — both are list[list[...]]
-    chars_grid:  height × width list of characters
-    colors_grid: height × width list of (r,g,b) tuples
-    """
     resized      = resize_image(image, width)
     gray         = to_grayscale(resized)
     gray_pixels  = list(gray.getdata())
     color_pixels = list(resized.convert("RGB").getdata())
     W, H         = resized.width, resized.height
+    mag, ang     = get_edge_data(gray) if edge else (None, None)
 
-    mag, ang = get_edge_data(gray) if edge else (None, None)
-
-    chars_grid  = []
-    colors_grid = []
+    chars_flat  = []
+    colors_flat = []
 
     for r in range(H):
-        row_chars  = []
-        row_colors = []
         for c in range(W):
             idx = r * W + c
             gp  = gray_pixels[idx]
@@ -84,25 +78,27 @@ def prepare_image_data(image: Image.Image, width: int, edge: bool):
                 ch = edge_char(ang[r, c])
             else:
                 ch = brightness_char(gp)
-            row_chars.append(ch)
-            row_colors.append(color_pixels[idx])
-        chars_grid.append(row_chars)
-        colors_grid.append(row_colors)
+            chars_flat.append(ch)
+            colors_flat.append(list(color_pixels[idx]))
 
-    return chars_grid, colors_grid, W, H
+    return chars_flat, colors_flat, W, H
 
 
-def render_html(chars_grid, colors_grid, W, H, use_color: bool) -> str:
-    """Render a completed chars/colors grid as an HTML block."""
+# --------------------------------------------------------------------------
+# Static HTML render (no animation)
+# --------------------------------------------------------------------------
+
+def render_static_html(chars_flat, colors_flat, W, H, use_color: bool) -> str:
     rows = []
     for r in range(H):
         spans = []
         for c in range(W):
-            ch = chars_grid[r][c]
+            idx = r * W + c
+            ch  = chars_flat[idx]
             if ch == " ":
                 spans.append("&nbsp;")
             elif use_color:
-                rv, gv, bv = colors_grid[r][c]
+                rv, gv, bv = colors_flat[idx]
                 spans.append(f'<span style="color:rgb({rv},{gv},{bv})">{ch}</span>')
             else:
                 spans.append(f'<span style="color:#ccc">{ch}</span>')
@@ -116,113 +112,112 @@ def render_html(chars_grid, colors_grid, W, H, use_color: bool) -> str:
     )
 
 
-def render_rain_frame(
-    chars_grid, colors_grid,
-    col_heads: list,   # current head row per column (-1 = not started)
-    settled: list,     # settled[r][c] = True once locked in
-    W: int, H: int,
-    use_color: bool,
-) -> str:
-    """Render one frame of the rain animation."""
-    rows = []
-    for r in range(H):
-        spans = []
-        for c in range(W):
-            head = col_heads[c]
+# --------------------------------------------------------------------------
+# Rain — self-contained HTML + JS component (runs in browser, no server loop)
+# --------------------------------------------------------------------------
 
-            if settled[r][c]:
-                # Locked-in image character
-                ch = chars_grid[r][c]
-                if ch == " ":
-                    spans.append("&nbsp;")
-                elif use_color:
-                    rv, gv, bv = colors_grid[r][c]
-                    spans.append(f'<span style="color:rgb({rv},{gv},{bv})">{ch}</span>')
-                else:
-                    spans.append(f'<span style="color:#aaa">{ch}</span>')
+def rain_component(chars_flat, colors_flat, W, H, use_color: bool, height_px: int):
+    chars_json  = json.dumps(chars_flat)
+    colors_json = json.dumps(colors_flat)
+    use_color_js = "true" if use_color else "false"
 
-            elif r == head:
-                # Bright falling head — always white
-                spans.append(f'<span style="color:#fff;font-weight:bold">{random.choice(RAIN_CHARS)}</span>')
+    html = f"""
+<div id="uz" style="background:#000;padding:16px;border-radius:4px;
+     font-family:monospace;font-size:12px;line-height:1.4;
+     white-space:pre;overflow:auto;"></div>
+<script>
+(function() {{
+  const W = {W}, H = {H};
+  const chars  = {chars_json};
+  const colors = {colors_json};
+  const useColor = {use_color_js};
+  const RAIN = "{RAIN_CHARS}";
+  const rc = () => RAIN[Math.floor(Math.random() * RAIN.length)];
 
-            elif head != -1 and r == head - 1:
-                # One row above head — dim cyan trail
-                spans.append(f'<span style="color:#0ff;opacity:0.5">{random.choice(RAIN_CHARS)}</span>')
+  const heads    = new Array(W).fill(-1);
+  const settled  = new Uint8Array(W * H);
+  const startAt  = Array.from({{length: W}},
+                    () => Math.floor(Math.random() * {max(H // 3, 1)}));
+  let frame = 0;
 
-            elif head != -1 and r < head and not settled[r][c]:
-                # Fading trail above
-                fade = max(0.08, 0.35 - (head - r) * 0.06)
-                spans.append(f'<span style="color:#0ff;opacity:{fade:.2f}">{random.choice(RAIN_CHARS)}</span>')
+  function render() {{
+    // advance columns
+    for (let c = 0; c < W; c++) {{
+      if (frame < startAt[c]) continue;
+      if (heads[c] === -1) {{
+        heads[c] = 0;
+      }} else if (heads[c] < H) {{
+        const prev = heads[c] - 1;
+        if (prev >= 0) settled[prev * W + c] = 1;
+        heads[c]++;
+      }} else {{
+        settled[(H - 1) * W + c] = 1;
+      }}
+    }}
 
-            else:
-                spans.append("&nbsp;")
+    // build HTML
+    let html = '';
+    for (let r = 0; r < H; r++) {{
+      for (let c = 0; c < W; c++) {{
+        const idx  = r * W + c;
+        const head = heads[c];
+        const ch   = chars[idx];
 
-        rows.append("".join(spans))
+        if (settled[idx]) {{
+          if (ch === ' ') {{
+            html += ' ';
+          }} else if (useColor) {{
+            const [rv,gv,bv] = colors[idx];
+            html += `<span style="color:rgb(${{rv}},${{gv}},${{bv}})">${{ch}}</span>`;
+          }} else {{
+            html += `<span style="color:#aaa">${{ch}}</span>`;
+          }}
+        }} else if (r === head) {{
+          html += `<span style="color:#fff;font-weight:bold">${{rc()}}</span>`;
+        }} else if (head !== -1 && r === head - 1) {{
+          html += `<span style="color:#0ff;opacity:0.55">${{rc()}}</span>`;
+        }} else if (head !== -1 && r < head) {{
+          const fade = Math.max(0.06, 0.4 - (head - r) * 0.07);
+          html += `<span style="color:#0ff;opacity:${{fade.toFixed(2)}}">${{rc()}}</span>`;
+        }} else {{
+          html += ' ';
+        }}
+      }}
+      html += '<br>';
+    }}
 
-    inner = "<br>".join(rows)
-    return (
-        "<div style='background:#000;padding:16px;border-radius:4px;"
-        "overflow:auto;font-family:monospace;font-size:12px;"
-        "line-height:1.4;white-space:pre;'>"
-        f"{inner}</div>"
-    )
+    document.getElementById('uz').innerHTML = html;
+    frame++;
 
+    // stop when every cell is settled
+    let done = true;
+    for (let i = 0; i < settled.length; i++) {{
+      if (!settled[i] && chars[i] !== ' ') {{ done = false; break; }}
+    }}
+    if (!done) setTimeout(render, 45);
+  }}
 
-def run_rain(image: Image.Image, width: int, edge: bool, use_color: bool, slot):
-    """Run the full rain reveal animation, updating `slot` each frame."""
-    chars_grid, colors_grid, W, H = prepare_image_data(image, width, edge)
-
-    # Each column starts at a random offset so they don't all fall together
-    col_heads = [-1] * W
-    settled   = [[False] * W for _ in range(H)]
-
-    # Stagger column starts: some begin immediately, others are delayed
-    col_start_frame = [random.randint(0, H // 2) for _ in range(W)]
-
-    frame      = 0
-    done_cols  = 0
-
-    while done_cols < W:
-        # Advance columns
-        for c in range(W):
-            if frame < col_start_frame[c]:
-                continue
-            if col_heads[c] == -1:
-                col_heads[c] = 0
-            elif col_heads[c] < H:
-                # Lock in the row just passed
-                prev = col_heads[c] - 1
-                if 0 <= prev < H:
-                    settled[prev][c] = True
-                col_heads[c] += 1
-            else:
-                # Column finished — lock final row
-                if not settled[H - 1][c]:
-                    settled[H - 1][c] = True
-                    done_cols += 1
-
-        html = render_rain_frame(
-            chars_grid, colors_grid,
-            col_heads, settled,
-            W, H, use_color,
-        )
-        slot.markdown(html, unsafe_allow_html=True)
-        time.sleep(0.045)
-        frame += 1
+  setTimeout(render, 80);
+}})();
+</script>
+"""
+    components.html(html, height=height_px, scrolling=False)
 
 
 # --------------------------------------------------------------------------
-# Helpers for plain/color static render
+# Static converters (used for download + webcam)
 # --------------------------------------------------------------------------
 
 def convert_to_ascii(image: Image.Image, width: int, edge: bool = False) -> str:
-    chars_grid, _, W, H = prepare_image_data(image, width, edge)
-    return "\n".join("".join(row) for row in chars_grid)
+    chars_flat, _, W, H = prepare_image_data(image, width, edge)
+    return "\n".join(
+        "".join(chars_flat[r * W : (r + 1) * W]) for r in range(H)
+    )
 
 
 def convert_to_colored_html(image: Image.Image, width: int, edge: bool = False) -> str:
-    chars_grid, colors_grid, W, H = prepare_image_data(image, width, edge)
-    return render_html(chars_grid, colors_grid, W, H, use_color=True)
+    chars_flat, colors_flat, W, H = prepare_image_data(image, width, edge)
+    return render_static_html(chars_flat, colors_flat, W, H, use_color=True)
 
 
 def bgr_frame_to_pil(frame: np.ndarray) -> Image.Image:
@@ -246,16 +241,12 @@ ctrl1, ctrl2, ctrl3, ctrl4, ctrl5, _ = st.columns([2, 2, 1, 1, 1, 1])
 
 with ctrl1:
     ascii_width = st.slider("Output width (chars)", 40, 200, 100, 5)
-
 with ctrl2:
     fps_target = st.slider("Webcam FPS", 1, 20, 8, 1)
-
 with ctrl3:
     color_mode = st.checkbox("🎨 Color", value=True)
-
 with ctrl4:
     edge_mode = st.checkbox("✏️ Edges", value=False)
-
 with ctrl5:
     rain_mode = st.checkbox("🌧 Rain", value=False)
 
@@ -293,27 +284,28 @@ with tab_upload:
 
             with col_ascii:
                 st.subheader("ASCII output")
-                output_slot = st.empty()
+
+                with st.spinner("Converting…"):
+                    chars_flat, colors_flat, W, H = prepare_image_data(
+                        image, ascii_width, edge_mode
+                    )
 
                 if rain_mode:
-                    # Rain plays immediately; replay button reruns the page
-                    run_rain(image, ascii_width, edge_mode, color_mode, output_slot)
-                    if st.button("↺ Replay rain"):
-                        st.rerun()
+                    # JS animation — runs in browser, no blocking
+                    rain_component(
+                        chars_flat, colors_flat, W, H,
+                        use_color=color_mode,
+                        height_px=H * 18 + 80,
+                    )
                 else:
-                    with st.spinner("Converting…"):
-                        if color_mode:
-                            output_slot.markdown(
-                                convert_to_colored_html(image, ascii_width, edge_mode),
-                                unsafe_allow_html=True,
-                            )
-                        else:
-                            output_slot.code(
-                                convert_to_ascii(image, ascii_width, edge_mode),
-                                language=None,
-                            )
+                    html_out = render_static_html(
+                        chars_flat, colors_flat, W, H, use_color=color_mode
+                    )
+                    st.markdown(html_out, unsafe_allow_html=True)
 
-                plain_dl = convert_to_ascii(image, ascii_width, edge_mode)
+                plain_dl = "\n".join(
+                    "".join(chars_flat[r * W : (r + 1) * W]) for r in range(H)
+                )
                 st.download_button(
                     "⬇ Download uzscii_output.txt",
                     data=plain_dl.encode("utf-8"),
@@ -346,7 +338,6 @@ with tab_webcam:
         if st.button("▶ Start", disabled=st.session_state.webcam_running):
             st.session_state.webcam_running = True
             st.rerun()
-
     with btn_col2:
         if st.button("■ Stop", disabled=not st.session_state.webcam_running):
             st.session_state.webcam_running = False
