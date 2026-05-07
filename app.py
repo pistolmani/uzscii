@@ -1,6 +1,7 @@
 """
 UZSCII — Image to ASCII Converter
 Supports still image upload and live webcam ASCII stream.
+Color mode samples real RGB from each pixel and applies it to its character.
 """
 
 import time
@@ -16,11 +17,11 @@ ASCII_CHARS = "@%#*+=-:. "
 
 
 # --------------------------------------------------------------------------
-# Core algorithm (shared by both upload and webcam modes)
+# Core pipeline
 # --------------------------------------------------------------------------
 
 def resize_image(image: Image.Image, new_width: int) -> Image.Image:
-    """Resize to target width; multiply height by 0.5 to correct char aspect ratio."""
+    """Resize to target width; 0.5 height correction for char aspect ratio."""
     w, h = image.size
     new_height = int(new_width * (h / w) * 0.5)
     return image.resize((new_width, max(new_height, 1)))
@@ -30,20 +31,65 @@ def to_grayscale(image: Image.Image) -> Image.Image:
     return image.convert("L")
 
 
-def pixels_to_ascii(image: Image.Image) -> str:
-    pixels = list(image.getdata())
+def convert_to_ascii(image: Image.Image, width: int) -> str:
+    """Plain ASCII — no color."""
+    resized = resize_image(image, width)
+    gray = to_grayscale(resized)
+    pixels = list(gray.getdata())
     n = len(ASCII_CHARS) - 1
     chars = [ASCII_CHARS[px * n // 255] for px in pixels]
-    w = image.width
+    w = resized.width
     return "\n".join("".join(chars[i : i + w]) for i in range(0, len(chars), w))
 
 
-def convert_to_ascii(image: Image.Image, width: int) -> str:
-    return pixels_to_ascii(to_grayscale(resize_image(image, width)))
+def convert_to_colored_html(image: Image.Image, width: int) -> str:
+    """
+    Colored ASCII — each character is styled with the real RGB color
+    of the original pixel at that position.
+    """
+    resized = resize_image(image, width)
+
+    # Brightness for character selection
+    gray = to_grayscale(resized)
+    gray_pixels = list(gray.getdata())
+
+    # Original color for styling (convert to RGB so we always get r,g,b)
+    color_pixels = list(resized.convert("RGB").getdata())
+
+    n = len(ASCII_CHARS) - 1
+    w = resized.width
+    rows = []
+
+    for row_start in range(0, len(gray_pixels), w):
+        row_gray   = gray_pixels[row_start : row_start + w]
+        row_color  = color_pixels[row_start : row_start + w]
+        spans = []
+        for gray_px, (r, g, b) in zip(row_gray, row_color):
+            char = ASCII_CHARS[gray_px * n // 255]
+            if char == " ":
+                spans.append("&nbsp;")
+            else:
+                spans.append(
+                    f'<span style="color:rgb({r},{g},{b})">{char}</span>'
+                )
+        rows.append("".join(spans))
+
+    inner = "<br>".join(rows)
+    return (
+        "<div style='"
+        "background:#000;"
+        "padding:16px;"
+        "border-radius:4px;"
+        "overflow:auto;"
+        "font-family:monospace;"
+        "font-size:12px;"
+        "line-height:1.4;"
+        "white-space:pre;'>"
+        f"{inner}</div>"
+    )
 
 
 def bgr_frame_to_pil(frame: np.ndarray) -> Image.Image:
-    """Convert an OpenCV BGR frame to a PIL RGB image."""
     return Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
 
 
@@ -57,16 +103,19 @@ st.title("▓ UZSCII")
 st.caption("Image-to-ASCII converter — upload a photo or stream your webcam live.")
 
 # --------------------------------------------------------------------------
-# Inline controls (no sidebar — avoids sidebar collapsing on interaction)
+# Inline controls
 # --------------------------------------------------------------------------
 
-ctrl_col1, ctrl_col2, _ = st.columns([2, 2, 4])
+ctrl1, ctrl2, ctrl3, _ = st.columns([2, 2, 1, 3])
 
-with ctrl_col1:
+with ctrl1:
     ascii_width = st.slider("Output width (chars)", 40, 200, 100, 5)
 
-with ctrl_col2:
-    fps_target = st.slider("Webcam FPS", 1, 20, 10, 1)
+with ctrl2:
+    fps_target = st.slider("Webcam FPS", 1, 20, 8, 1)
+
+with ctrl3:
+    color_mode = st.checkbox("🎨 Color", value=True)
 
 st.divider()
 
@@ -81,7 +130,6 @@ tab_upload, tab_webcam = st.tabs(["📁 Upload Image", "📷 Live Webcam"])
 
 with tab_upload:
 
-    # Session state key trick: incrementing forces a fresh empty uploader
     if "uploader_key" not in st.session_state:
         st.session_state.uploader_key = 0
 
@@ -92,8 +140,8 @@ with tab_upload:
     )
 
     if uploaded_file is not None:
-        # Clear button — resets uploader by bumping the key
-        if st.button("✕ Remove image", key="clear_btn"):
+
+        if st.button("✕ Remove image"):
             st.session_state.uploader_key += 1
             st.rerun()
 
@@ -101,16 +149,30 @@ with tab_upload:
             image = Image.open(uploaded_file)
 
             with st.spinner("Converting…"):
-                ascii_result = convert_to_ascii(image, ascii_width)
+                if color_mode:
+                    html_output = convert_to_colored_html(image, ascii_width)
+                else:
+                    plain_output = convert_to_ascii(image, ascii_width)
 
             col_ascii, col_img = st.columns([2, 1])
 
             with col_ascii:
                 st.subheader("ASCII output")
-                st.code(ascii_result, language=None)
+                if color_mode:
+                    st.markdown(html_output, unsafe_allow_html=True)
+                else:
+                    st.code(plain_output, language=None)
+
+                # Download is always plain text
+                with st.spinner("Preparing download…"):
+                    plain_for_download = (
+                        convert_to_ascii(image, ascii_width)
+                        if color_mode
+                        else plain_output
+                    )
                 st.download_button(
                     "⬇ Download uzscii_output.txt",
-                    data=ascii_result.encode("utf-8"),
+                    data=plain_for_download.encode("utf-8"),
                     file_name="uzscii_output.txt",
                     mime="text/plain",
                 )
@@ -122,7 +184,6 @@ with tab_upload:
 
         except Exception as e:
             st.error(f"Could not process image: {e}")
-            st.info("Make sure the file is a valid JPG, JPEG, PNG, or WEBP image.")
 
     else:
         st.info("Upload an image above to get started.")
@@ -147,14 +208,14 @@ with tab_webcam:
             st.session_state.webcam_running = False
             st.rerun()
 
-    status = st.empty()
+    status     = st.empty()
     frame_slot = st.empty()
 
     if st.session_state.webcam_running:
         cap = cv2.VideoCapture(0)
 
         if not cap.isOpened():
-            status.error("Could not open webcam. Make sure it is connected and not in use by another app.")
+            status.error("Could not open webcam. Make sure it is connected and not in use.")
             st.session_state.webcam_running = False
         else:
             status.success("Webcam streaming — click ■ Stop to end.")
@@ -168,8 +229,13 @@ with tab_webcam:
                         break
 
                     pil_image = bgr_frame_to_pil(frame)
-                    ascii_frame = convert_to_ascii(pil_image, ascii_width)
-                    frame_slot.code(ascii_frame, language=None)
+
+                    if color_mode:
+                        html_frame = convert_to_colored_html(pil_image, ascii_width)
+                        frame_slot.markdown(html_frame, unsafe_allow_html=True)
+                    else:
+                        ascii_frame = convert_to_ascii(pil_image, ascii_width)
+                        frame_slot.code(ascii_frame, language=None)
 
                     time.sleep(frame_interval)
 
