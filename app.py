@@ -6,14 +6,15 @@ Color mode samples real RGB from each pixel and applies it to its character.
 
 import time
 import streamlit as st
-from PIL import Image
+from PIL import Image, ImageFilter
 import cv2
 import numpy as np
 
 # --------------------------------------------------------------------------
-# ASCII character set — dark (dense) → light (sparse)
+# Character sets — dark (dense) → light (sparse), numbers only
 # --------------------------------------------------------------------------
-ASCII_CHARS = "@%#*+=-:. "
+CHARS_STANDARD = "8096532471:. "   # 13 gradations
+CHARS_EDGE     = r"/\|-."          # directional edge characters
 
 
 # --------------------------------------------------------------------------
@@ -31,47 +32,97 @@ def to_grayscale(image: Image.Image) -> Image.Image:
     return image.convert("L")
 
 
-def convert_to_ascii(image: Image.Image, width: int) -> str:
-    """Plain ASCII — no color."""
-    resized = resize_image(image, width)
-    gray = to_grayscale(resized)
-    pixels = list(gray.getdata())
-    n = len(ASCII_CHARS) - 1
-    chars = [ASCII_CHARS[px * n // 255] for px in pixels]
-    w = resized.width
+def brightness_char(brightness: int, charset: str) -> str:
+    n = len(charset) - 1
+    return charset[brightness * n // 255]
+
+
+def edge_char(angle_deg: float) -> str:
+    """Map a gradient angle (0–180°) to a directional character."""
+    a = angle_deg % 180
+    if a < 22.5 or a >= 157.5:
+        return "-"
+    elif a < 67.5:
+        return "/"
+    elif a < 112.5:
+        return "|"
+    else:
+        return "\\"
+
+
+def get_edge_data(gray: Image.Image) -> tuple:
+    """
+    Return (magnitude array, angle array) using Sobel filters.
+    magnitude is 0–255 float, angle is degrees 0–180.
+    """
+    arr = np.array(gray, dtype=np.float32)
+    gx = cv2.Sobel(arr, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(arr, cv2.CV_32F, 0, 1, ksize=3)
+    mag   = np.sqrt(gx**2 + gy**2)
+    angle = np.degrees(np.arctan2(np.abs(gy), np.abs(gx)))  # 0–90, map to 0–180
+    # Remap arctan2 result to full 0–180 considering sign
+    angle = np.degrees(np.arctan2(gy, gx)) % 180
+    # Normalise magnitude to 0–255
+    if mag.max() > 0:
+        mag = mag / mag.max() * 255
+    return mag, angle
+
+
+def convert_to_ascii(image: Image.Image, width: int, edge_mode: bool = False) -> str:
+    """Plain ASCII — no color. Optional edge-enhanced mode."""
+    resized  = resize_image(image, width)
+    gray     = to_grayscale(resized)
+    gray_px  = list(gray.getdata())
+    w        = resized.width
+
+    if edge_mode:
+        mag, angle = get_edge_data(gray)
+        rows = []
+        for r in range(resized.height):
+            row = []
+            for c in range(w):
+                idx = r * w + c
+                if mag[r, c] > 40:
+                    row.append(edge_char(angle[r, c]))
+                else:
+                    row.append(brightness_char(gray_px[idx], CHARS_STANDARD))
+            rows.append("".join(row))
+        return "\n".join(rows)
+
+    chars = [brightness_char(px, CHARS_STANDARD) for px in gray_px]
     return "\n".join("".join(chars[i : i + w]) for i in range(0, len(chars), w))
 
 
-def convert_to_colored_html(image: Image.Image, width: int) -> str:
+def convert_to_colored_html(image: Image.Image, width: int, edge_mode: bool = False) -> str:
     """
     Colored ASCII — each character is styled with the real RGB color
     of the original pixel at that position.
     """
-    resized = resize_image(image, width)
-
-    # Brightness for character selection
-    gray = to_grayscale(resized)
-    gray_pixels = list(gray.getdata())
-
-    # Original color for styling (convert to RGB so we always get r,g,b)
+    resized      = resize_image(image, width)
+    gray         = to_grayscale(resized)
+    gray_pixels  = list(gray.getdata())
     color_pixels = list(resized.convert("RGB").getdata())
+    w            = resized.width
 
-    n = len(ASCII_CHARS) - 1
-    w = resized.width
+    if edge_mode:
+        mag, angle = get_edge_data(gray)
+
     rows = []
-
     for row_start in range(0, len(gray_pixels), w):
-        row_gray   = gray_pixels[row_start : row_start + w]
-        row_color  = color_pixels[row_start : row_start + w]
+        row_idx   = row_start // w
+        row_gray  = gray_pixels[row_start : row_start + w]
+        row_color = color_pixels[row_start : row_start + w]
         spans = []
-        for gray_px, (r, g, b) in zip(row_gray, row_color):
-            char = ASCII_CHARS[gray_px * n // 255]
+        for col_idx, (gray_px, (r, g, b)) in enumerate(zip(row_gray, row_color)):
+            if edge_mode and mag[row_idx, col_idx] > 40:
+                char = edge_char(angle[row_idx, col_idx])
+            else:
+                char = brightness_char(gray_px, CHARS_STANDARD)
+
             if char == " ":
                 spans.append("&nbsp;")
             else:
-                spans.append(
-                    f'<span style="color:rgb({r},{g},{b})">{char}</span>'
-                )
+                spans.append(f'<span style="color:rgb({r},{g},{b})">{char}</span>')
         rows.append("".join(spans))
 
     inner = "<br>".join(rows)
@@ -106,7 +157,7 @@ st.caption("Image-to-ASCII converter — upload a photo or stream your webcam li
 # Inline controls
 # --------------------------------------------------------------------------
 
-ctrl1, ctrl2, ctrl3, _ = st.columns([2, 2, 1, 3])
+ctrl1, ctrl2, ctrl3, ctrl4, _ = st.columns([2, 2, 1, 1, 2])
 
 with ctrl1:
     ascii_width = st.slider("Output width (chars)", 40, 200, 100, 5)
@@ -116,6 +167,9 @@ with ctrl2:
 
 with ctrl3:
     color_mode = st.checkbox("🎨 Color", value=True)
+
+with ctrl4:
+    edge_mode = st.checkbox("✏️ Edges", value=False)
 
 st.divider()
 
@@ -150,9 +204,9 @@ with tab_upload:
 
             with st.spinner("Converting…"):
                 if color_mode:
-                    html_output = convert_to_colored_html(image, ascii_width)
+                    html_output = convert_to_colored_html(image, ascii_width, edge_mode)
                 else:
-                    plain_output = convert_to_ascii(image, ascii_width)
+                    plain_output = convert_to_ascii(image, ascii_width, edge_mode)
 
             col_ascii, col_img = st.columns([2, 1])
 
@@ -166,7 +220,7 @@ with tab_upload:
                 # Download is always plain text
                 with st.spinner("Preparing download…"):
                     plain_for_download = (
-                        convert_to_ascii(image, ascii_width)
+                        convert_to_ascii(image, ascii_width, edge_mode)
                         if color_mode
                         else plain_output
                     )
@@ -231,10 +285,10 @@ with tab_webcam:
                     pil_image = bgr_frame_to_pil(frame)
 
                     if color_mode:
-                        html_frame = convert_to_colored_html(pil_image, ascii_width)
+                        html_frame = convert_to_colored_html(pil_image, ascii_width, edge_mode)
                         frame_slot.markdown(html_frame, unsafe_allow_html=True)
                     else:
-                        ascii_frame = convert_to_ascii(pil_image, ascii_width)
+                        ascii_frame = convert_to_ascii(pil_image, ascii_width, edge_mode)
                         frame_slot.code(ascii_frame, language=None)
 
                     time.sleep(frame_interval)
