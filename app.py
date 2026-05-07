@@ -1,20 +1,22 @@
 """
 UZSCII — Image to ASCII Converter
 Supports still image upload and live webcam ASCII stream.
-Color mode samples real RGB from each pixel and applies it to its character.
+Color mode samples real RGB from each pixel.
+Rain mode reveals the image Matrix-style, column by column.
 """
 
 import time
+import random
 import streamlit as st
 from PIL import Image, ImageFilter
 import cv2
 import numpy as np
 
 # --------------------------------------------------------------------------
-# Character sets — dark (dense) → light (sparse), numbers only
+# Character sets
 # --------------------------------------------------------------------------
-CHARS_STANDARD = "8096532471:. "   # 13 gradations
-CHARS_EDGE     = r"/\|-."          # directional edge characters
+CHARS_STANDARD = "8096532471:. "   # dark → light, numbers only
+RAIN_CHARS     = "8096532471"      # random chars used for falling heads
 
 
 # --------------------------------------------------------------------------
@@ -22,7 +24,6 @@ CHARS_EDGE     = r"/\|-."          # directional edge characters
 # --------------------------------------------------------------------------
 
 def resize_image(image: Image.Image, new_width: int) -> Image.Image:
-    """Resize to target width; 0.5 height correction for char aspect ratio."""
     w, h = image.size
     new_height = int(new_width * (h / w) * 0.5)
     return image.resize((new_width, max(new_height, 1)))
@@ -32,112 +33,196 @@ def to_grayscale(image: Image.Image) -> Image.Image:
     return image.convert("L")
 
 
-def brightness_char(brightness: int, charset: str) -> str:
-    n = len(charset) - 1
-    return charset[brightness * n // 255]
+def brightness_char(brightness: int) -> str:
+    n = len(CHARS_STANDARD) - 1
+    return CHARS_STANDARD[brightness * n // 255]
 
 
 def edge_char(angle_deg: float) -> str:
-    """Map a gradient angle (0–180°) to a directional character."""
     a = angle_deg % 180
-    if a < 22.5 or a >= 157.5:
-        return "-"
-    elif a < 67.5:
-        return "/"
-    elif a < 112.5:
-        return "|"
-    else:
-        return "\\"
+    if a < 22.5 or a >= 157.5:  return "-"
+    elif a < 67.5:               return "/"
+    elif a < 112.5:              return "|"
+    else:                        return "\\"
 
 
-def get_edge_data(gray: Image.Image) -> tuple:
-    """
-    Return (magnitude array, angle array) using Sobel filters.
-    magnitude is 0–255 float, angle is degrees 0–180.
-    """
+def get_edge_data(gray: Image.Image):
     arr = np.array(gray, dtype=np.float32)
-    gx = cv2.Sobel(arr, cv2.CV_32F, 1, 0, ksize=3)
-    gy = cv2.Sobel(arr, cv2.CV_32F, 0, 1, ksize=3)
-    mag   = np.sqrt(gx**2 + gy**2)
-    angle = np.degrees(np.arctan2(np.abs(gy), np.abs(gx)))  # 0–90, map to 0–180
-    # Remap arctan2 result to full 0–180 considering sign
-    angle = np.degrees(np.arctan2(gy, gx)) % 180
-    # Normalise magnitude to 0–255
+    gx  = cv2.Sobel(arr, cv2.CV_32F, 1, 0, ksize=3)
+    gy  = cv2.Sobel(arr, cv2.CV_32F, 0, 1, ksize=3)
+    mag = np.sqrt(gx**2 + gy**2)
+    ang = np.degrees(np.arctan2(gy, gx)) % 180
     if mag.max() > 0:
         mag = mag / mag.max() * 255
-    return mag, angle
+    return mag, ang
 
 
-def convert_to_ascii(image: Image.Image, width: int, edge_mode: bool = False) -> str:
-    """Plain ASCII — no color. Optional edge-enhanced mode."""
-    resized  = resize_image(image, width)
-    gray     = to_grayscale(resized)
-    gray_px  = list(gray.getdata())
-    w        = resized.width
-
-    if edge_mode:
-        mag, angle = get_edge_data(gray)
-        rows = []
-        for r in range(resized.height):
-            row = []
-            for c in range(w):
-                idx = r * w + c
-                if mag[r, c] > 40:
-                    row.append(edge_char(angle[r, c]))
-                else:
-                    row.append(brightness_char(gray_px[idx], CHARS_STANDARD))
-            rows.append("".join(row))
-        return "\n".join(rows)
-
-    chars = [brightness_char(px, CHARS_STANDARD) for px in gray_px]
-    return "\n".join("".join(chars[i : i + w]) for i in range(0, len(chars), w))
-
-
-def convert_to_colored_html(image: Image.Image, width: int, edge_mode: bool = False) -> str:
+def prepare_image_data(image: Image.Image, width: int, edge: bool):
     """
-    Colored ASCII — each character is styled with the real RGB color
-    of the original pixel at that position.
+    Returns (chars_grid, colors_grid) — both are list[list[...]]
+    chars_grid:  height × width list of characters
+    colors_grid: height × width list of (r,g,b) tuples
     """
     resized      = resize_image(image, width)
     gray         = to_grayscale(resized)
     gray_pixels  = list(gray.getdata())
     color_pixels = list(resized.convert("RGB").getdata())
-    w            = resized.width
+    W, H         = resized.width, resized.height
 
-    if edge_mode:
-        mag, angle = get_edge_data(gray)
+    mag, ang = get_edge_data(gray) if edge else (None, None)
 
+    chars_grid  = []
+    colors_grid = []
+
+    for r in range(H):
+        row_chars  = []
+        row_colors = []
+        for c in range(W):
+            idx = r * W + c
+            gp  = gray_pixels[idx]
+            if edge and mag[r, c] > 40:
+                ch = edge_char(ang[r, c])
+            else:
+                ch = brightness_char(gp)
+            row_chars.append(ch)
+            row_colors.append(color_pixels[idx])
+        chars_grid.append(row_chars)
+        colors_grid.append(row_colors)
+
+    return chars_grid, colors_grid, W, H
+
+
+def render_html(chars_grid, colors_grid, W, H, use_color: bool) -> str:
+    """Render a completed chars/colors grid as an HTML block."""
     rows = []
-    for row_start in range(0, len(gray_pixels), w):
-        row_idx   = row_start // w
-        row_gray  = gray_pixels[row_start : row_start + w]
-        row_color = color_pixels[row_start : row_start + w]
+    for r in range(H):
         spans = []
-        for col_idx, (gray_px, (r, g, b)) in enumerate(zip(row_gray, row_color)):
-            if edge_mode and mag[row_idx, col_idx] > 40:
-                char = edge_char(angle[row_idx, col_idx])
-            else:
-                char = brightness_char(gray_px, CHARS_STANDARD)
-
-            if char == " ":
+        for c in range(W):
+            ch = chars_grid[r][c]
+            if ch == " ":
                 spans.append("&nbsp;")
+            elif use_color:
+                rv, gv, bv = colors_grid[r][c]
+                spans.append(f'<span style="color:rgb({rv},{gv},{bv})">{ch}</span>')
             else:
-                spans.append(f'<span style="color:rgb({r},{g},{b})">{char}</span>')
+                spans.append(f'<span style="color:#ccc">{ch}</span>')
+        rows.append("".join(spans))
+    inner = "<br>".join(rows)
+    return (
+        "<div style='background:#000;padding:16px;border-radius:4px;"
+        "overflow:auto;font-family:monospace;font-size:12px;"
+        "line-height:1.4;white-space:pre;'>"
+        f"{inner}</div>"
+    )
+
+
+def render_rain_frame(
+    chars_grid, colors_grid,
+    col_heads: list,   # current head row per column (-1 = not started)
+    settled: list,     # settled[r][c] = True once locked in
+    W: int, H: int,
+    use_color: bool,
+) -> str:
+    """Render one frame of the rain animation."""
+    rows = []
+    for r in range(H):
+        spans = []
+        for c in range(W):
+            head = col_heads[c]
+
+            if settled[r][c]:
+                # Locked-in image character
+                ch = chars_grid[r][c]
+                if ch == " ":
+                    spans.append("&nbsp;")
+                elif use_color:
+                    rv, gv, bv = colors_grid[r][c]
+                    spans.append(f'<span style="color:rgb({rv},{gv},{bv})">{ch}</span>')
+                else:
+                    spans.append(f'<span style="color:#aaa">{ch}</span>')
+
+            elif r == head:
+                # Bright falling head — always white
+                spans.append(f'<span style="color:#fff;font-weight:bold">{random.choice(RAIN_CHARS)}</span>')
+
+            elif head != -1 and r == head - 1:
+                # One row above head — dim cyan trail
+                spans.append(f'<span style="color:#0ff;opacity:0.5">{random.choice(RAIN_CHARS)}</span>')
+
+            elif head != -1 and r < head and not settled[r][c]:
+                # Fading trail above
+                fade = max(0.08, 0.35 - (head - r) * 0.06)
+                spans.append(f'<span style="color:#0ff;opacity:{fade:.2f}">{random.choice(RAIN_CHARS)}</span>')
+
+            else:
+                spans.append("&nbsp;")
+
         rows.append("".join(spans))
 
     inner = "<br>".join(rows)
     return (
-        "<div style='"
-        "background:#000;"
-        "padding:16px;"
-        "border-radius:4px;"
-        "overflow:auto;"
-        "font-family:monospace;"
-        "font-size:12px;"
-        "line-height:1.4;"
-        "white-space:pre;'>"
+        "<div style='background:#000;padding:16px;border-radius:4px;"
+        "overflow:auto;font-family:monospace;font-size:12px;"
+        "line-height:1.4;white-space:pre;'>"
         f"{inner}</div>"
     )
+
+
+def run_rain(image: Image.Image, width: int, edge: bool, use_color: bool, slot):
+    """Run the full rain reveal animation, updating `slot` each frame."""
+    chars_grid, colors_grid, W, H = prepare_image_data(image, width, edge)
+
+    # Each column starts at a random offset so they don't all fall together
+    col_heads = [-1] * W
+    settled   = [[False] * W for _ in range(H)]
+
+    # Stagger column starts: some begin immediately, others are delayed
+    col_start_frame = [random.randint(0, H // 2) for _ in range(W)]
+
+    frame      = 0
+    done_cols  = 0
+
+    while done_cols < W:
+        # Advance columns
+        for c in range(W):
+            if frame < col_start_frame[c]:
+                continue
+            if col_heads[c] == -1:
+                col_heads[c] = 0
+            elif col_heads[c] < H:
+                # Lock in the row just passed
+                prev = col_heads[c] - 1
+                if 0 <= prev < H:
+                    settled[prev][c] = True
+                col_heads[c] += 1
+            else:
+                # Column finished — lock final row
+                if not settled[H - 1][c]:
+                    settled[H - 1][c] = True
+                    done_cols += 1
+
+        html = render_rain_frame(
+            chars_grid, colors_grid,
+            col_heads, settled,
+            W, H, use_color,
+        )
+        slot.markdown(html, unsafe_allow_html=True)
+        time.sleep(0.045)
+        frame += 1
+
+
+# --------------------------------------------------------------------------
+# Helpers for plain/color static render
+# --------------------------------------------------------------------------
+
+def convert_to_ascii(image: Image.Image, width: int, edge: bool = False) -> str:
+    chars_grid, _, W, H = prepare_image_data(image, width, edge)
+    return "\n".join("".join(row) for row in chars_grid)
+
+
+def convert_to_colored_html(image: Image.Image, width: int, edge: bool = False) -> str:
+    chars_grid, colors_grid, W, H = prepare_image_data(image, width, edge)
+    return render_html(chars_grid, colors_grid, W, H, use_color=True)
 
 
 def bgr_frame_to_pil(frame: np.ndarray) -> Image.Image:
@@ -157,7 +242,7 @@ st.caption("Image-to-ASCII converter — upload a photo or stream your webcam li
 # Inline controls
 # --------------------------------------------------------------------------
 
-ctrl1, ctrl2, ctrl3, ctrl4, _ = st.columns([2, 2, 1, 1, 2])
+ctrl1, ctrl2, ctrl3, ctrl4, ctrl5, _ = st.columns([2, 2, 1, 1, 1, 1])
 
 with ctrl1:
     ascii_width = st.slider("Output width (chars)", 40, 200, 100, 5)
@@ -170,6 +255,9 @@ with ctrl3:
 
 with ctrl4:
     edge_mode = st.checkbox("✏️ Edges", value=False)
+
+with ctrl5:
+    rain_mode = st.checkbox("🌧 Rain", value=False)
 
 st.divider()
 
@@ -201,32 +289,34 @@ with tab_upload:
 
         try:
             image = Image.open(uploaded_file)
-
-            with st.spinner("Converting…"):
-                if color_mode:
-                    html_output = convert_to_colored_html(image, ascii_width, edge_mode)
-                else:
-                    plain_output = convert_to_ascii(image, ascii_width, edge_mode)
-
             col_ascii, col_img = st.columns([2, 1])
 
             with col_ascii:
                 st.subheader("ASCII output")
-                if color_mode:
-                    st.markdown(html_output, unsafe_allow_html=True)
-                else:
-                    st.code(plain_output, language=None)
+                output_slot = st.empty()
 
-                # Download is always plain text
-                with st.spinner("Preparing download…"):
-                    plain_for_download = (
-                        convert_to_ascii(image, ascii_width, edge_mode)
-                        if color_mode
-                        else plain_output
-                    )
+                if rain_mode:
+                    # Rain plays immediately; replay button reruns the page
+                    run_rain(image, ascii_width, edge_mode, color_mode, output_slot)
+                    if st.button("↺ Replay rain"):
+                        st.rerun()
+                else:
+                    with st.spinner("Converting…"):
+                        if color_mode:
+                            output_slot.markdown(
+                                convert_to_colored_html(image, ascii_width, edge_mode),
+                                unsafe_allow_html=True,
+                            )
+                        else:
+                            output_slot.code(
+                                convert_to_ascii(image, ascii_width, edge_mode),
+                                language=None,
+                            )
+
+                plain_dl = convert_to_ascii(image, ascii_width, edge_mode)
                 st.download_button(
                     "⬇ Download uzscii_output.txt",
-                    data=plain_for_download.encode("utf-8"),
+                    data=plain_dl.encode("utf-8"),
                     file_name="uzscii_output.txt",
                     mime="text/plain",
                 )
@@ -285,11 +375,15 @@ with tab_webcam:
                     pil_image = bgr_frame_to_pil(frame)
 
                     if color_mode:
-                        html_frame = convert_to_colored_html(pil_image, ascii_width, edge_mode)
-                        frame_slot.markdown(html_frame, unsafe_allow_html=True)
+                        frame_slot.markdown(
+                            convert_to_colored_html(pil_image, ascii_width, edge_mode),
+                            unsafe_allow_html=True,
+                        )
                     else:
-                        ascii_frame = convert_to_ascii(pil_image, ascii_width, edge_mode)
-                        frame_slot.code(ascii_frame, language=None)
+                        frame_slot.code(
+                            convert_to_ascii(pil_image, ascii_width, edge_mode),
+                            language=None,
+                        )
 
                     time.sleep(frame_interval)
 
