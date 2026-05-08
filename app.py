@@ -449,12 +449,18 @@ with tab_webcam:
 
                     if color_mode:
                         frame_slot.markdown(
-                            convert_to_colored_html(pil_image, ascii_width, edge_mode),
+                            convert_to_colored_html(
+                                pil_image, ascii_width, edge_mode,
+                                charset, invert, contrast, brightness_amt,
+                            ),
                             unsafe_allow_html=True,
                         )
                     else:
                         frame_slot.code(
-                            convert_to_ascii(pil_image, ascii_width, edge_mode),
+                            convert_to_ascii(
+                                pil_image, ascii_width, edge_mode,
+                                charset, invert, contrast, brightness_amt,
+                            ),
                             language=None,
                         )
 
@@ -465,3 +471,43 @@ with tab_webcam:
                 status.info("Webcam stopped.")
     else:
         status.info("Press ▶ Start to begin the ASCII webcam stream.")
+
+    if st.session_state.snapshot_image is not None:
+        st.divider()
+        snap_header, snap_clear = st.columns([6, 1])
+        with snap_header:
+            st.subheader("📸 Snapshot")
+        with snap_clear:
+            if st.button("🗑 Discard"):
+                st.session_state.snapshot_image = None
+                st.rerun()
+
+        snap_img = st.session_state.snapshot_image
+
+        with st.spinner("Converting…"):
+            chars_flat, colors_flat, W, H = prepare_image_data(
+                snap_img, ascii_width, edge_mode,
+                charset, invert, contrast, brightness_amt,
+            )
+
+        if rain_mode:
+            rain_component(
+                chars_flat, colors_flat, W, H,
+                use_color=color_mode,
+                height_px=H * 18 + 80,
+            )
+        else:
+            html_out = render_static_html(
+                chars_flat, colors_flat, W, H, use_color=color_mode
+            )
+            st.markdown(html_out, unsafe_allow_html=True)
+
+        plain_dl = "\n".join(
+            "".join(chars_flat[r * W : (r + 1) * W]) for r in range(H)
+        )
+        st.download_button(
+            "⬇ Download uzscii_snapshot.txt",
+            data=plain_dl.encode("utf-8"),
+            file_name="uzscii_snapshot.txt",
+            mime="text/plain",
+        )
