@@ -72,7 +72,19 @@ def get_edge_data(gray: Image.Image):
     return mag, ang
 
 
-def prepare_image_data(image: Image.Image, width: int, edge: bool):
+def prepare_image_data(
+    image: Image.Image,
+    width: int,
+    edge: bool,
+    charset: str = CHARS_STANDARD,
+    invert: bool = False,
+    contrast: float = 1.0,
+    brightness_amt: float = 1.0,
+):
+    if not charset or len(charset) < 2:
+        charset = CHARS_STANDARD
+
+    image        = apply_enhancements(image, contrast, brightness_amt)
     resized      = resize_image(image, width)
     gray         = to_grayscale(resized)
     gray_pixels  = list(gray.getdata())
@@ -90,7 +102,7 @@ def prepare_image_data(image: Image.Image, width: int, edge: bool):
             if edge and mag[r, c] > 40:
                 ch = edge_char(ang[r, c])
             else:
-                ch = brightness_char(gp)
+                ch = brightness_char(gp, charset, invert)
             chars_flat.append(ch)
             colors_flat.append(list(color_pixels[idx]))
 
