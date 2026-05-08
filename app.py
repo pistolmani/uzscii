@@ -35,9 +35,12 @@ def to_grayscale(image: Image.Image) -> Image.Image:
     return image.convert("L")
 
 
-def brightness_char(brightness: int) -> str:
-    n = len(CHARS_STANDARD) - 1
-    return CHARS_STANDARD[brightness * n // 255]
+def brightness_char(brightness: int, charset: str = CHARS_STANDARD, invert: bool = False) -> str:
+    n = len(charset) - 1
+    i = brightness * n // 255
+    if invert:
+        i = n - i
+    return charset[i]
 
 
 def edge_char(angle_deg: float) -> str:
