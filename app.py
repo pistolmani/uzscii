@@ -388,8 +388,12 @@ with tab_webcam:
 
     if "webcam_running" not in st.session_state:
         st.session_state.webcam_running = False
+    if "snapshot_image" not in st.session_state:
+        st.session_state.snapshot_image = None
+    if "snapshot_pending" not in st.session_state:
+        st.session_state.snapshot_pending = False
 
-    btn_col1, btn_col2, _ = st.columns([1, 1, 6])
+    btn_col1, btn_col2, btn_col3, _ = st.columns([1, 1, 1, 5])
 
     with btn_col1:
         if st.button("▶ Start", disabled=st.session_state.webcam_running):
@@ -399,9 +403,30 @@ with tab_webcam:
         if st.button("■ Stop", disabled=not st.session_state.webcam_running):
             st.session_state.webcam_running = False
             st.rerun()
+    with btn_col3:
+        if st.button("📸 Snapshot", disabled=not st.session_state.webcam_running):
+            st.session_state.snapshot_pending = True
+            st.session_state.webcam_running = False
+            st.rerun()
 
     status     = st.empty()
     frame_slot = st.empty()
+
+    if st.session_state.snapshot_pending:
+        cap = cv2.VideoCapture(0)
+        if not cap.isOpened():
+            status.error("Could not open webcam to capture snapshot.")
+        else:
+            for _ in range(3):
+                cap.read()
+            ret, frame = cap.read()
+            if ret:
+                st.session_state.snapshot_image = bgr_frame_to_pil(frame)
+            else:
+                status.warning("Snapshot failed — could not read frame.")
+            cap.release()
+        st.session_state.snapshot_pending = False
+        st.rerun()
 
     if st.session_state.webcam_running:
         cap = cv2.VideoCapture(0)
