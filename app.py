@@ -43,6 +43,16 @@ def brightness_char(brightness: int, charset: str = CHARS_STANDARD, invert: bool
     return charset[i]
 
 
+def apply_enhancements(img: Image.Image, contrast: float, brightness: float) -> Image.Image:
+    if contrast == 1.0 and brightness == 1.0:
+        return img
+    if contrast != 1.0:
+        img = ImageEnhance.Contrast(img).enhance(contrast)
+    if brightness != 1.0:
+        img = ImageEnhance.Brightness(img).enhance(brightness)
+    return img
+
+
 def edge_char(angle_deg: float) -> str:
     a = angle_deg % 180
     if a < 22.5 or a >= 157.5:  return "-"
