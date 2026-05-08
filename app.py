@@ -250,8 +250,18 @@ def convert_to_ascii(
     )
 
 
-def convert_to_colored_html(image: Image.Image, width: int, edge: bool = False) -> str:
-    chars_flat, colors_flat, W, H = prepare_image_data(image, width, edge)
+def convert_to_colored_html(
+    image: Image.Image,
+    width: int,
+    edge: bool = False,
+    charset: str = CHARS_STANDARD,
+    invert: bool = False,
+    contrast: float = 1.0,
+    brightness_amt: float = 1.0,
+) -> str:
+    chars_flat, colors_flat, W, H = prepare_image_data(
+        image, width, edge, charset, invert, contrast, brightness_amt
+    )
     return render_static_html(chars_flat, colors_flat, W, H, use_color=True)
 
 
