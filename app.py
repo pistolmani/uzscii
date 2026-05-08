@@ -343,7 +343,8 @@ with tab_upload:
 
                 with st.spinner("Converting…"):
                     chars_flat, colors_flat, W, H = prepare_image_data(
-                        image, ascii_width, edge_mode
+                        image, ascii_width, edge_mode,
+                        charset, invert, contrast, brightness_amt,
                     )
 
                 if rain_mode:
