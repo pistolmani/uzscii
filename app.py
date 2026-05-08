@@ -295,6 +295,17 @@ with ctrl4:
 with ctrl5:
     rain_mode = st.checkbox("🌧 Rain", value=False)
 
+with st.expander("⚙ Advanced", expanded=False):
+    adv1, adv2, adv3, adv4 = st.columns([3, 2, 2, 1])
+    with adv1:
+        charset = st.text_input("Charset (dark → light)", value=CHARS_STANDARD)
+    with adv2:
+        contrast = st.slider("Contrast", 0.5, 2.5, 1.0, 0.1)
+    with adv3:
+        brightness_amt = st.slider("Brightness", 0.5, 2.0, 1.0, 0.1)
+    with adv4:
+        invert = st.checkbox("Invert", value=False)
+
 st.divider()
 
 # --------------------------------------------------------------------------
