@@ -233,8 +233,18 @@ def rain_component(chars_flat, colors_flat, W, H, use_color: bool, height_px: in
 # Static converters (used for download + webcam)
 # --------------------------------------------------------------------------
 
-def convert_to_ascii(image: Image.Image, width: int, edge: bool = False) -> str:
-    chars_flat, _, W, H = prepare_image_data(image, width, edge)
+def convert_to_ascii(
+    image: Image.Image,
+    width: int,
+    edge: bool = False,
+    charset: str = CHARS_STANDARD,
+    invert: bool = False,
+    contrast: float = 1.0,
+    brightness_amt: float = 1.0,
+) -> str:
+    chars_flat, _, W, H = prepare_image_data(
+        image, width, edge, charset, invert, contrast, brightness_amt
+    )
     return "\n".join(
         "".join(chars_flat[r * W : (r + 1) * W]) for r in range(H)
     )
