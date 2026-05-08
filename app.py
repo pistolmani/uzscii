@@ -10,7 +10,7 @@ import time
 import random
 import streamlit as st
 import streamlit.components.v1 as components
-from PIL import Image
+from PIL import Image, ImageEnhance
 import cv2
 import numpy as np
 
