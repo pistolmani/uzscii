@@ -10,7 +10,7 @@ import time
 import random
 import streamlit as st
 import streamlit.components.v1 as components
-from PIL import Image
+from PIL import Image, ImageEnhance
 import cv2
 import numpy as np
 
@@ -35,9 +35,22 @@ def to_grayscale(image: Image.Image) -> Image.Image:
     return image.convert("L")
 
 
-def brightness_char(brightness: int) -> str:
-    n = len(CHARS_STANDARD) - 1
-    return CHARS_STANDARD[brightness * n // 255]
+def brightness_char(brightness: int, charset: str = CHARS_STANDARD, invert: bool = False) -> str:
+    n = len(charset) - 1
+    i = brightness * n // 255
+    if invert:
+        i = n - i
+    return charset[i]
+
+
+def apply_enhancements(img: Image.Image, contrast: float, brightness: float) -> Image.Image:
+    if contrast == 1.0 and brightness == 1.0:
+        return img
+    if contrast != 1.0:
+        img = ImageEnhance.Contrast(img).enhance(contrast)
+    if brightness != 1.0:
+        img = ImageEnhance.Brightness(img).enhance(brightness)
+    return img
 
 
 def edge_char(angle_deg: float) -> str:
@@ -59,7 +72,19 @@ def get_edge_data(gray: Image.Image):
     return mag, ang
 
 
-def prepare_image_data(image: Image.Image, width: int, edge: bool):
+def prepare_image_data(
+    image: Image.Image,
+    width: int,
+    edge: bool,
+    charset: str = CHARS_STANDARD,
+    invert: bool = False,
+    contrast: float = 1.0,
+    brightness_amt: float = 1.0,
+):
+    if not charset or len(charset) < 2:
+        charset = CHARS_STANDARD
+
+    image        = apply_enhancements(image, contrast, brightness_amt)
     resized      = resize_image(image, width)
     gray         = to_grayscale(resized)
     gray_pixels  = list(gray.getdata())
@@ -77,7 +102,7 @@ def prepare_image_data(image: Image.Image, width: int, edge: bool):
             if edge and mag[r, c] > 40:
                 ch = edge_char(ang[r, c])
             else:
-                ch = brightness_char(gp)
+                ch = brightness_char(gp, charset, invert)
             chars_flat.append(ch)
             colors_flat.append(list(color_pixels[idx]))
 
@@ -208,15 +233,35 @@ def rain_component(chars_flat, colors_flat, W, H, use_color: bool, height_px: in
 # Static converters (used for download + webcam)
 # --------------------------------------------------------------------------
 
-def convert_to_ascii(image: Image.Image, width: int, edge: bool = False) -> str:
-    chars_flat, _, W, H = prepare_image_data(image, width, edge)
+def convert_to_ascii(
+    image: Image.Image,
+    width: int,
+    edge: bool = False,
+    charset: str = CHARS_STANDARD,
+    invert: bool = False,
+    contrast: float = 1.0,
+    brightness_amt: float = 1.0,
+) -> str:
+    chars_flat, _, W, H = prepare_image_data(
+        image, width, edge, charset, invert, contrast, brightness_amt
+    )
     return "\n".join(
         "".join(chars_flat[r * W : (r + 1) * W]) for r in range(H)
     )
 
 
-def convert_to_colored_html(image: Image.Image, width: int, edge: bool = False) -> str:
-    chars_flat, colors_flat, W, H = prepare_image_data(image, width, edge)
+def convert_to_colored_html(
+    image: Image.Image,
+    width: int,
+    edge: bool = False,
+    charset: str = CHARS_STANDARD,
+    invert: bool = False,
+    contrast: float = 1.0,
+    brightness_amt: float = 1.0,
+) -> str:
+    chars_flat, colors_flat, W, H = prepare_image_data(
+        image, width, edge, charset, invert, contrast, brightness_amt
+    )
     return render_static_html(chars_flat, colors_flat, W, H, use_color=True)
 
 
@@ -249,6 +294,17 @@ with ctrl4:
     edge_mode = st.checkbox("✏️ Edges", value=False)
 with ctrl5:
     rain_mode = st.checkbox("🌧 Rain", value=False)
+
+with st.expander("⚙ Advanced", expanded=False):
+    adv1, adv2, adv3, adv4 = st.columns([3, 2, 2, 1])
+    with adv1:
+        charset = st.text_input("Charset (dark → light)", value=CHARS_STANDARD)
+    with adv2:
+        contrast = st.slider("Contrast", 0.5, 2.5, 1.0, 0.1)
+    with adv3:
+        brightness_amt = st.slider("Brightness", 0.5, 2.0, 1.0, 0.1)
+    with adv4:
+        invert = st.checkbox("Invert", value=False)
 
 st.divider()
 
@@ -287,7 +343,8 @@ with tab_upload:
 
                 with st.spinner("Converting…"):
                     chars_flat, colors_flat, W, H = prepare_image_data(
-                        image, ascii_width, edge_mode
+                        image, ascii_width, edge_mode,
+                        charset, invert, contrast, brightness_amt,
                     )
 
                 if rain_mode:
@@ -331,8 +388,12 @@ with tab_webcam:
 
     if "webcam_running" not in st.session_state:
         st.session_state.webcam_running = False
+    if "snapshot_image" not in st.session_state:
+        st.session_state.snapshot_image = None
+    if "snapshot_pending" not in st.session_state:
+        st.session_state.snapshot_pending = False
 
-    btn_col1, btn_col2, _ = st.columns([1, 1, 6])
+    btn_col1, btn_col2, btn_col3, _ = st.columns([1, 1, 1, 5])
 
     with btn_col1:
         if st.button("▶ Start", disabled=st.session_state.webcam_running):
@@ -342,9 +403,30 @@ with tab_webcam:
         if st.button("■ Stop", disabled=not st.session_state.webcam_running):
             st.session_state.webcam_running = False
             st.rerun()
+    with btn_col3:
+        if st.button("📸 Snapshot", disabled=not st.session_state.webcam_running):
+            st.session_state.snapshot_pending = True
+            st.session_state.webcam_running = False
+            st.rerun()
 
     status     = st.empty()
     frame_slot = st.empty()
+
+    if st.session_state.snapshot_pending:
+        cap = cv2.VideoCapture(0)
+        if not cap.isOpened():
+            status.error("Could not open webcam to capture snapshot.")
+        else:
+            for _ in range(3):
+                cap.read()
+            ret, frame = cap.read()
+            if ret:
+                st.session_state.snapshot_image = bgr_frame_to_pil(frame)
+            else:
+                status.warning("Snapshot failed — could not read frame.")
+            cap.release()
+        st.session_state.snapshot_pending = False
+        st.rerun()
 
     if st.session_state.webcam_running:
         cap = cv2.VideoCapture(0)
@@ -367,12 +449,18 @@ with tab_webcam:
 
                     if color_mode:
                         frame_slot.markdown(
-                            convert_to_colored_html(pil_image, ascii_width, edge_mode),
+                            convert_to_colored_html(
+                                pil_image, ascii_width, edge_mode,
+                                charset, invert, contrast, brightness_amt,
+                            ),
                             unsafe_allow_html=True,
                         )
                     else:
                         frame_slot.code(
-                            convert_to_ascii(pil_image, ascii_width, edge_mode),
+                            convert_to_ascii(
+                                pil_image, ascii_width, edge_mode,
+                                charset, invert, contrast, brightness_amt,
+                            ),
                             language=None,
                         )
 
@@ -383,3 +471,43 @@ with tab_webcam:
                 status.info("Webcam stopped.")
     else:
         status.info("Press ▶ Start to begin the ASCII webcam stream.")
+
+    if st.session_state.snapshot_image is not None:
+        st.divider()
+        snap_header, snap_clear = st.columns([6, 1])
+        with snap_header:
+            st.subheader("📸 Snapshot")
+        with snap_clear:
+            if st.button("🗑 Discard"):
+                st.session_state.snapshot_image = None
+                st.rerun()
+
+        snap_img = st.session_state.snapshot_image
+
+        with st.spinner("Converting…"):
+            chars_flat, colors_flat, W, H = prepare_image_data(
+                snap_img, ascii_width, edge_mode,
+                charset, invert, contrast, brightness_amt,
+            )
+
+        if rain_mode:
+            rain_component(
+                chars_flat, colors_flat, W, H,
+                use_color=color_mode,
+                height_px=H * 18 + 80,
+            )
+        else:
+            html_out = render_static_html(
+                chars_flat, colors_flat, W, H, use_color=color_mode
+            )
+            st.markdown(html_out, unsafe_allow_html=True)
+
+        plain_dl = "\n".join(
+            "".join(chars_flat[r * W : (r + 1) * W]) for r in range(H)
+        )
+        st.download_button(
+            "⬇ Download uzscii_snapshot.txt",
+            data=plain_dl.encode("utf-8"),
+            file_name="uzscii_snapshot.txt",
+            mime="text/plain",
+        )
