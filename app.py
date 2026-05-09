@@ -392,6 +392,8 @@ with tab_webcam:
         st.session_state.snapshot_image = None
     if "snapshot_pending" not in st.session_state:
         st.session_state.snapshot_pending = False
+    if "last_frame" not in st.session_state:
+        st.session_state.last_frame = None
 
     btn_col1, btn_col2, btn_col3, _ = st.columns([1, 1, 1, 5])
 
@@ -412,19 +414,12 @@ with tab_webcam:
     status     = st.empty()
     frame_slot = st.empty()
 
+    # Snapshot: use the last streamed frame — no need to reopen the webcam
     if st.session_state.snapshot_pending:
-        cap = cv2.VideoCapture(0)
-        if not cap.isOpened():
-            status.error("Could not open webcam to capture snapshot.")
+        if st.session_state.last_frame is not None:
+            st.session_state.snapshot_image = st.session_state.last_frame
         else:
-            for _ in range(3):
-                cap.read()
-            ret, frame = cap.read()
-            if ret:
-                st.session_state.snapshot_image = bgr_frame_to_pil(frame)
-            else:
-                status.warning("Snapshot failed — could not read frame.")
-            cap.release()
+            status.warning("No frame captured yet — start streaming first.")
         st.session_state.snapshot_pending = False
         st.rerun()
 
@@ -446,6 +441,7 @@ with tab_webcam:
                         break
 
                     pil_image = bgr_frame_to_pil(frame)
+                    st.session_state.last_frame = pil_image  # always keep latest frame
 
                     if color_mode:
                         frame_slot.markdown(
